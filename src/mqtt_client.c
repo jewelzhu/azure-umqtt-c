@@ -1254,7 +1254,9 @@ void mqtt_client_dowork(MQTT_CLIENT_HANDLE handle)
                         size_t size = BUFFER_length(pingPacket);
                         (void)sendPacketItem(mqtt_client, BUFFER_u_char(pingPacket), size);
                         BUFFER_delete(pingPacket);
+                        if (mqtt_client->timeSincePing == 0) {
                         (void)tickcounter_get_current_ms(mqtt_client->packetTickCntr, &mqtt_client->timeSincePing);
+                        }
 
                         if (mqtt_client->logTrace)
                         {
