@@ -37,7 +37,7 @@ typedef struct MQTT_CLIENT_TAG
     MQTTCODEC_HANDLE codec_handle;
     CONTROL_PACKET_TYPE packetState;
     TICK_COUNTER_HANDLE packetTickCntr;
-    tickcounter_ms_t packetSendTimeMs;
+    tickcounter_ms_t packetRecvTimeMs;
     ON_MQTT_OPERATION_CALLBACK fnOperationCallback;
     ON_MQTT_MESSAGE_RECV_CALLBACK fnMessageRecv;
     void* ctx;
@@ -328,24 +328,17 @@ static int sendPacketItem(MQTT_CLIENT* mqtt_client, const unsigned char* data, s
 {
     int result;
 
-    if (tickcounter_get_current_ms(mqtt_client->packetTickCntr, &mqtt_client->packetSendTimeMs) != 0)
+    result = xio_send(mqtt_client->xioHandle, (const void*)data, length, sendComplete, mqtt_client);
+    if (result != 0)
     {
-        LOG(AZ_LOG_ERROR, LOG_LINE, "Failure getting current ms tickcounter");
+        LOG(AZ_LOG_ERROR, LOG_LINE, "%d: Failure sending control packet data", result);
         result = __FAILURE__;
     }
     else
     {
-        result = xio_send(mqtt_client->xioHandle, (const void*)data, length, sendComplete, mqtt_client);
-        if (result != 0)
-        {
-            LOG(AZ_LOG_ERROR, LOG_LINE, "%d: Failure sending control packet data", result);
-            result = __FAILURE__;
-        }
-        else
-        {
-            logOutgoingRawTrace(mqtt_client, (const uint8_t*)data, length);
-        }
+        logOutgoingRawTrace(mqtt_client, (const uint8_t*)data, length);
     }
+
     return result;
 }
 
@@ -588,7 +581,11 @@ static void recvCompleteCallback(void* context, CONTROL_PACKET_TYPE packet, int 
 
         logIncomingRawTrace(mqtt_client, packet, (uint8_t)flags, iterator, len);
 
-        if ((iterator != NULL && len > 0) || packet == PINGRESP_TYPE)
+        if (tickcounter_get_current_ms(mqtt_client->packetTickCntr, &mqtt_client->packetRecvTimeMs) != 0)
+        {
+            LOG(AZ_LOG_ERROR, LOG_LINE, "Failure getting current ms tickcounter");
+        }
+        else if ((iterator != NULL && len > 0) || packet == PINGRESP_TYPE)
         {
             switch (packet)
             {
@@ -1242,11 +1239,15 @@ void mqtt_client_dowork(MQTT_CLIENT_HANDLE handle)
                     // We haven't gotten a ping response in the alloted time
                     set_error_callback(mqtt_client, MQTT_CLIENT_NO_PING_RESPONSE);
                     mqtt_client->timeSincePing = 0;
-                    mqtt_client->packetSendTimeMs = 0;
+                    mqtt_client->packetRecvTimeMs = 0;
                     mqtt_client->packetState = UNKNOWN_TYPE;
                 }
-                else if (((current_ms - mqtt_client->packetSendTimeMs) / 1000) >= mqtt_client->keepAliveInterval)
+                else if (((current_ms - mqtt_client->packetRecvTimeMs) / 1000) >= mqtt_client->keepAliveInterval)
                 {
+                    if (mqtt_client->timeSincePing > 0) {
+                        // already sent ping but no response yet, keep waiting, don't send another ping
+                        return;
+                    }
                     /*Codes_SRS_MQTT_CLIENT_07_026: [if keepAliveInternal is > 0 and the send time is greater than the MQTT KeepAliveInterval then it shall construct an MQTT PINGREQ packet.]*/
                     BUFFER_HANDLE pingPacket = mqtt_codec_ping();
                     if (pingPacket != NULL)
